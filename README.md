@@ -1,287 +1,139 @@
-Task 1 - CL.TE
-Scenario
-You are performing a security assessment on an internal e-commerce platform.
-During traffic analysis, you intercept HTTP requests passing through a reverse proxy before reaching the backend server. The application uses persistent connections, and multiple requests are handled over the same connection.
-While reviewing captured traffic, you notice inconsistencies in how request boundaries are handled between different components of the infrastructure.
-Your task is to analyze the provided data and determine whether any unintended request has been processed by the backend system.
+# Scaler — HTTP Protocol Security Lab: Guided Walkthrough
 
-Access Instructions
-Launch the lab environment:
-HTTP-Request link
+> This guide walks you through the **approach** for each scenario without revealing the answers. Use it to build your methodology — not to skip the analysis.
 
-STEPS
-Step 1 - Understand the Two Parsing Modes
-Look at the request headers carefully. There are two headers that define how the body length should be calculated.
-Identify which header is used by the proxy
-Identify which header is used by the backend
+---
 
-Step 2 - Walk Through the Proxy’s Perspective
-Follow how the proxy processes the request:
-Determine how it calculates the body length
-Count how much data it considers part of the request
-From the proxy’s perspective, how many requests exist?
+## Scenario 01: CL.TE Desync
 
-Step 3 - Walk Through the Backend’s Perspective
-Now analyze how the backend interprets the same request:
-Observe how it determines where the body ends
-Identify the exact termination point
-Compare this with the proxy’s interpretation
+**What you're looking at:** A captured HTTP request from a passive network tap between a CDN proxy and an origin server. Both servers handle the same request, but they disagree on how to determine where the request body ends.
 
-Step 4 - Identify Remaining Data
-After the backend finishes processing the request:
-Check if any data remains unprocessed
-Determine how the backend handles this leftover data
-Analyze whether it is treated as a separate request
+### Step 1 — Understand the Two Parsing Modes
 
-Step 5 - Extract the Executed Request
-From the remaining data:
-Identify the method and endpoint
-Extract the full path (including parameters)
-This represents the unintended request processed by the backend
+Look at the request headers carefully. There are **two headers** that both define how the body length should be calculated. The proxy trusts one, the origin trusts the other. Identify which server uses which header from the Target Configuration panel.
 
-Objective
-Analyze how the request is interpreted by different systems
-Identify inconsistencies in request parsing
-Determine the unintended request executed by the backend
-Submit the correct answer to retrieve the flag
+### Step 2 — Walk Through the Proxy's Perspective
 
-Submission
-Enter your answer in the input field inside the lab
-Click Submit Analysis
-If correct, the flag will be revealed
+The proxy reads the body using its preferred header. Count the exact number of bytes it considers as the body. From the proxy's point of view, how many HTTP requests exist in this stream? The answer should be one — everything is part of a single POST.
 
-Important Notes
-Focus on request parsing behavior, not guessing
-The answer is fully present in the provided data
-Pay attention to how request boundaries are defined
-No external tools are required
+### Step 3 — Walk Through the Origin's Perspective
 
-Flag Format
-Flag{Scaler_XXXXXX}
+Now switch to the origin's parsing logic. It uses the other header to read the body. Under chunked transfer encoding, the body ends at a specific termination signal. Find that termination point in the raw request.
 
+### Step 4 — Find What's Left in the Buffer
 
+After the origin finishes reading the body (which ends much earlier than the proxy thinks), there are leftover bytes sitting in the TCP connection buffer. The origin will parse those leftover bytes as a **brand new, independent request**. Read those bytes — that's your smuggled request.
 
+### Step 5 — Extract the Path
 
+The smuggled request has a method, a path, and query parameters. The answer is the full path (including the query string) of this second request that only the origin sees.
 
+**Where to look:** Raw Request tab, Hex Dump tab (highlighted bytes show the smuggled portion), Parsed Headers tab (Conflict Analysis pane).
 
+---
 
+## Scenario 02: TE.CL Cache Poison
 
+**What you're looking at:** A crafted request sent to a reverse proxy + backend stack where the proxy and backend disagree on body parsing — but in the **opposite direction** from Scenario 01. A cache layer (Varnish) sits in front, caching GET responses.
 
+### Step 1 — Identify Which Server Uses Which Header
 
+This is a TE.CL desync — the reverse of CL.TE. Read the Infrastructure Map to confirm: the proxy uses Transfer-Encoding, the backend uses Content-Length. This is critical because it changes which server "sees too much" vs "sees too little."
 
+### Step 2 — Follow the Proxy's Parse
 
+The proxy reads the body as chunked. Look at the chunk sizes in the raw payload. The first chunk has a hex size — convert it to decimal to understand how many bytes the proxy reads. The terminal chunk (`0`) signals the end. From the proxy's view, this is one complete POST request.
 
+### Step 3 — Follow the Backend's Parse
 
+The backend ignores Transfer-Encoding and uses `Content-Length`. Look at the Content-Length value — it's very small. Count exactly that many bytes from the start of the body. That tiny slice is all the backend considers as the POST body.
 
+### Step 4 — Identify the Remainder
 
+Everything after those few bytes is still in the TCP buffer. The backend's HTTP parser will attempt to read the next request from this buffer. Look at what comes immediately after the Content-Length boundary — you should see a fully formed HTTP request line.
 
+### Step 5 — Determine Method + Path
 
-Task 2 - TE.CL Desync
-Scenario
-You are assessing a web application that utilizes caching mechanisms to improve performance for frequently accessed resources.
-During your analysis, you observe that responses served to users are sometimes inconsistent and appear to contain unexpected data. This raises concerns about whether cached content can be influenced or manipulated under certain conditions.
-Your task is to investigate how the application handles requests and determine whether it is possible to affect responses served to other users.
+The smuggled request has a clear HTTP method and path. That's your answer: the method and path that the backend parses from the leftover buffer.
 
-Access Instructions
-Launch the lab environment using the link below:
-HTTP Request Link
+**Where to look:** Raw Payload tab, Backend View (Apache) tab — the split pane shows exactly what Apache reads as body vs what remains. The Varnish Cache Log confirms what got cached.
 
-Steps
-Step 1 - Identify Which Server Uses Which Header
-This scenario involves a mismatch in how different systems interpret request boundaries.
-Identify which component uses Transfer-Encoding
-Identify which component uses Content-Length
-Understand how this difference impacts request parsing
+---
 
-Step 2 - Follow the Proxy’s Parse
-Analyze how the proxy processes the request:
-Observe how chunked encoding is handled
-Identify chunk sizes and termination points
-Determine what the proxy considers as the complete request
+## Scenario 03: SSRF Attack Chain
 
-Step 3 - Follow the Backend’s Parse
-Now switch to the backend’s perspective:
-Observe how it uses Content-Length
-Determine how many bytes it reads as the request body
-Compare this with the proxy’s interpretation
-
-Step 4 - Identify the Remaining Data
-After the backend processes its portion:
-Check if additional data remains in the buffer
-Analyze how this leftover data is interpreted
-Determine whether it forms a new request
+**What you're looking at:** Incident response logs from a breached AWS-hosted SaaS platform. The attacker used a webhook feature to make the server fetch URLs of their choosing (SSRF). The logs show a sequence of requests that progressively dig deeper into the cloud infrastructure.
 
-Step 5 - Determine the Executed Request
-From the remaining data:
-Identify the HTTP method
-Extract the full path
-This represents the request processed independently by the backend
+### Step 1 — Read the Application Logs Chronologically
 
-Objective
-Analyze inconsistencies in request parsing across systems
-Understand how this affects caching and response handling
-Identify the unintended request processed by the backend
-Submit the correct answer to retrieve the flag
+Open the `webhook-service.log` panel. The attacker made several requests in sequence, each one building on information from the previous response. Read the `Fetching URL:` entries in order — they tell you exactly what the attacker was targeting.
 
-Submission
-Enter your answer in the input field inside the lab
-Click Submit Analysis
-If correct, the flag will be displayed
+### Step 2 — Identify the Target of the First Probe
 
-Important Notes
-Focus on how different systems interpret the same request
-Pay attention to parsing boundaries and leftover data
-This is a behavior and protocol-level analysis, not guessing
-No external tools are required
+The attacker's first SSRF request targets a specific IP address. This isn't a random internal host — it's a well-known cloud service endpoint. The IP address appears in every single SSRF request in the logs. Note it.
 
-Flag Format
-Flag{Scaler_XXXXXX}
+### Step 3 — Understand the Enumeration Pattern
 
+The attacker follows a specific path hierarchy on that IP:
+1. First request: the root metadata path
+2. Second request: navigates to a specific metadata category
+3. Third request: retrieves the actual sensitive data
 
+This is a classic three-step enumeration pattern for a specific cloud service.
 
+### Step 4 — Cross-Reference with CloudTrail
 
+The CloudTrail logs show what the attacker did **after** obtaining credentials from the SSRF. The `GetCallerIdentity` call confirms what role was compromised. The subsequent API calls show the full blast radius.
 
+### Step 5 — Submit the Pivot Point
 
+The question asks for the IP address that made the entire chain possible. It's the common target across all the SSRF requests — the endpoint that serves instance metadata including credentials.
 
+**Where to look:** The `webhook-service.log` panel — every SSRF URL contains the target IP. The SSRF Response panel confirms what was returned.
 
+---
 
+## Scenario 04: XSS to Session Hijack
 
-Task 3 - SSRF Chain
-Scenario
-You are assessing a cloud-hosted application that includes a webhook feature capable of fetching external URLs.
-During routine monitoring, suspicious outbound requests are observed originating from the application. These requests appear to target internal resources and follow a structured pattern.
-Additionally, cloud activity logs indicate that certain API calls were made using credentials that may not belong to legitimate users.
-Your task is to analyze the available logs and determine how the attack progressed.
+**What you're looking at:** Forensic artifacts from a multi-stage intrusion — a database extract showing a stored XSS payload, a recovered JavaScript file from an S3 bucket, a browser network capture, and server access logs showing the session being reused from a different IP.
 
-Access Instructions
-Launch the lab environment using the link below:
-HTTP Request Link
+### Step 1 — Trace the XSS Payload
 
-STEPS
-Step 1 - Read the Application Logs Chronologically
-Open the application logs panel.
-Review the sequence of outbound requests
-Focus on entries showing URL fetch activity
-Identify how each request builds on the previous one
+Start with the database artifact (task #4721 description). The XSS payload uses an `<img>` tag with an `onerror` handler that loads an external script. Note the URL of the external script — this is the **hosting** location, but it's not where the stolen data goes.
 
-Step 2 - Identify the Target of the Initial Requests
-Analyze the destination of these requests:
-Look for repeated IP addresses or endpoints
-Determine whether the target represents an internal or special-purpose service
-Identify the common target across multiple requests
+### Step 2 — Read the External Script
 
-Step 3 - Understand the Enumeration Pattern
-Observe how the attacker navigates through the target:
-Initial request to a base path
-Follow-up requests exploring deeper paths
-Final request retrieving sensitive data
+Switch to the recovered `t.js` source. This is the actual exfiltration code. Read it line by line:
+- What data does it collect?
+- How does it encode the data?
+- Where does it send the data?
 
-Step 4 - Correlate with Cloud Activity
-Now examine the cloud activity logs:
-Identify API calls made after the requests
-Determine which identity or role was used
-Analyze how access was expanded after obtaining credentials
+The script constructs a URL and makes a request to it. The **domain** in that URL is where stolen data is sent.
 
-Step 5 - Identify the Pivot Point
-Determine the key element that enabled the attack:
-Identify the endpoint that exposed sensitive metadata
-This endpoint is common across all the requests
-This is the entry point that made the entire chain possible
+### Step 3 — Distinguish Hosting from Exfiltration
 
-Objective
-Analyze application logs and outbound requests
-Understand how internal resources were accessed
-Correlate SSRF activity with cloud-level impact
-Identify the critical pivot point used in the attack
-Submit the correct answer to retrieve the flag
+There are two different external domains in this attack:
+1. Where the malicious script is **hosted** (the S3 bucket URL in the XSS payload)
+2. Where the stolen data is **sent** (the URL inside the script's `Image().src`)
 
-Submission
-Enter your answer in the input field inside the lab
-Click Submit Analysis
-If correct, the flag will be revealed
+These are different domains. The question asks for the exfiltration destination, not the script host.
 
-Important Notes
-Focus on request patterns and log correlation
-The attack is multi-step and builds progressively
-Pay attention to repeated targets across requests
-This is a chain-based analysis, not a single-step issue
+### Step 4 — Verify with the Network Capture
 
-Flag Format
-Flag{Scaler_XXXXXX}
+Switch to the Network Capture tab. This shows the actual HTTP request that left the admin's browser when the script executed. The `Host` header and the request URL confirm the exfiltration domain. The decoded base64 payload shows exactly what was stolen.
 
+### Step 5 — Confirm the Chain in Access Logs
 
+The access logs show the timeline: the admin views the task, the outbound request fires, and then minutes later the same session ID appears from a completely different IP address. The `[IP MISMATCH]` alerts confirm session hijacking. The subsequent `POST /admin/users/create` entries show the attacker creating persistence.
 
+**Where to look:** The `t.js Source` tab for the exfiltration URL, the Network Capture tab for confirmation. Don't confuse the S3 hosting domain with the data collection domain.
 
+---
 
+## General Tips
 
-
-
-
-
-
-
-
-
-
-
-TASK 4 - XSS Hijack
-Scenario
-You are investigating a potential client-side attack in a web application used by administrators to manage internal operations.
-During analysis of stored data and access logs, you discover that a malicious payload was injected into user-controlled content. Shortly after, unusual outbound requests were observed from an administrator’s browser, followed by suspicious activity originating from a different IP address.
-Your task is to analyze the available artifacts and determine how the attack was executed and where sensitive data was sent.
-
-Access Instructions
-Launch the lab environment using the link below:
-HTTP Request
-
-Steps
-Step 1 - Trace the Injected Payload
-Start by analyzing the stored application data:
-Identify how the payload is executed
-Locate any external resources being loaded
-Note the URL where the external script is hosted
-
-Step 2 - Analyze the External Script
-Review the contents of the external script:
-Determine what data is being collected
-Observe how the data is processed or encoded
-Identify how the script transmits the data
-
-Step 3 - Differentiate Key Components
-Distinguish between:
-The location where the script is hosted
-The destination where collected data is sent
-These are separate endpoints and serve different purposes in the attack.
-
-Step 4 - Validate with Network Activity
-Examine the network capture:
-Identify outbound requests triggered by the script
-Observe the destination of these requests
-Analyze any transmitted data
-
-Step 5 - Correlate with Access Logs
-Review the access logs:
-Identify any session anomalies
-Look for activity from unexpected IP addresses
-Trace actions performed after the compromise
-
-Objective
-Analyze the injected payload and its execution flow
-Understand how data is collected and transmitted
-Identify the destination where sensitive data is exfiltrated
-Submit the correct answer to retrieve the flag
-
-Submission
-Enter your answer in the input field inside the lab
-Click Submit Analysis
-If correct, the flag will be revealed
-
-Important Notes
-Focus on the difference between script hosting and data exfiltration
-Pay attention to network behavior and request destinations
-The attack involves multiple stages — analyze them sequentially
-This is a client-side attack with server-side impact
-
-Flag Format
-Flag{Scaler_XXXXXX}
-
+- **Read every tab.** The split panes, alternate views, and log panels contain different perspectives on the same data. Switching between them often makes the answer obvious.
+- **Follow the timestamps.** The logs are in chronological order. The sequence of events tells the story.
+- **Look at what's highlighted.** In hex views, highlighted bytes mark the interesting regions. In log panels, color-coded severity levels (WARN, CRIT, ALERT) point to anomalies.
+- **Think like the parser.** For smuggling challenges, mentally step through each server's parsing algorithm byte by byte. The disagreement between parsers is the entire vulnerability.
+- **Think like the attacker.** For chain challenges, each step produces output that enables the next step. Follow the information flow.
